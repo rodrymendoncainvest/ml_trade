@@ -1,0 +1,25 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS crap
+.DS_Store
+Thumbs.db
+
+# IDE configs
+.vscode/
+.idea/
+
+# Large data not meant for GitHub
+storage/
+data/history/
+Tickers_1H/
+
+# Models — só publica se quiseres
+*.pth
+*.pt
