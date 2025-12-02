@@ -1,121 +1,150 @@
-# nbeats.py
 import torch
 import torch.nn as nn
+import math
 
 
 # ============================================================
-# BLOCO BÁSICO N-BEATS
+# Helpers
 # ============================================================
+
+def init_linear(layer):
+    """Initialização recomendada no N-BEATS."""
+    nn.init.kaiming_uniform_(layer.weight, a=math.sqrt(5))
+    if layer.bias is not None:
+        nn.init.zeros_(layer.bias)
+
+
+# ============================================================
+# BLOCO BASE
+# ============================================================
+
 class NBeatsBlock(nn.Module):
     """
-    Bloco fundamental do N-BEATS:
-        - MLP profundo
-        - Backcast + Forecast heads
-        - Residual learning
+    Bloco N-BEATS refinado:
+    - MLP profundo
+    - Weight Normalization
+    - Dropout financeiro
+    - Backcast + Forecast heads
     """
 
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: int,
         theta_dim: int,
-        nb_layers: int = 4,
-        layer_size: int = 512,
+        n_layers: int = 4,
+        layer_size: int = 256,
+        dropout: float = 0.1,
     ):
         super().__init__()
 
         layers = []
-        in_dim = input_dim
+        for i in range(n_layers):
+            inp = input_dim if i == 0 else layer_size
+            dense = nn.Linear(inp, layer_size)
+            init_linear(dense)
 
-        for _ in range(nb_layers):
-            layers.append(nn.Linear(in_dim, layer_size))
+            layers.append(nn.utils.weight_norm(dense))
             layers.append(nn.ReLU())
-            in_dim = layer_size
+            layers.append(nn.Dropout(dropout))
 
         self.fc = nn.Sequential(*layers)
 
-        # parâmetros do bloco
+        # heads
         self.backcast_fc = nn.Linear(layer_size, input_dim)
         self.forecast_fc = nn.Linear(layer_size, theta_dim)
 
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.orthogonal_(m.weight)
-                nn.init.zeros_(m.bias)
+        init_linear(self.backcast_fc)
+        init_linear(self.forecast_fc)
 
     def forward(self, x):
-        x_in = x
-        x = x.view(x.size(0), -1)  # flatten → (batch, window*features)
-
         h = self.fc(x)
-
         backcast = self.backcast_fc(h)
         forecast = self.forecast_fc(h)
-
         return backcast, forecast
 
 
 # ============================================================
-# MODELO N-BEATS COMPLETO (GENERIC STACK)
+# FULL N-BEATS MODEL — V4
 # ============================================================
+
 class NBeatsModel(nn.Module):
     """
-    N-BEATS Industrial para forecasting financeiro.
-
-    Input:
-        x → (batch, window, features)
-
-    Output:
-        y → (batch, horizon)
+    N-BEATS V4 Finance-ready:
+    - Generic + Trend stacks
+    - MLP profundo
+    - Forecast robusto em horizontes pequenos (1-step)
     """
 
     def __init__(
         self,
-        input_dim: int,      # features
-        window_size: int,    # histórico
+        input_dim: int,
+        window_size: int,
         horizon: int = 1,
-        hidden_dim: int = 512,
-        num_blocks: int = 4,     # mais blocos = mais potência
-        nb_layers: int = 4,
-        layer_size: int = 512,
+        num_blocks_generic: int = 3,
+        num_blocks_trend: int = 3,
+        layer_size: int = 256,
+        n_layers: int = 4,
+        dropout: float = 0.1,
     ):
         super().__init__()
 
-        self.window_size = window_size
         self.input_dim = input_dim
+        self.window_size = window_size
         self.horizon = horizon
 
-        # dimensão de entrada para cada bloco
-        block_input_dim = window_size * input_dim
+        block_dim = input_dim * window_size
         theta_dim = horizon
 
-        # stacks
-        self.blocks = nn.ModuleList([
+        # ---------------------------------------------------------
+        # GENÉRIC STACK (capta padrões arbitrários)
+        # ---------------------------------------------------------
+        self.generic_blocks = nn.ModuleList([
             NBeatsBlock(
-                input_dim=block_input_dim,
-                hidden_dim=hidden_dim,
+                input_dim=block_dim,
                 theta_dim=theta_dim,
-                nb_layers=nb_layers,
+                n_layers=n_layers,
                 layer_size=layer_size,
+                dropout=dropout,
             )
-            for _ in range(num_blocks)
+            for _ in range(num_blocks_generic)
         ])
 
+        # ---------------------------------------------------------
+        # TREND STACK (capta drift + tendência lenta)
+        # ---------------------------------------------------------
+        self.trend_blocks = nn.ModuleList([
+            NBeatsBlock(
+                input_dim=block_dim,
+                theta_dim=theta_dim,
+                n_layers=n_layers,
+                layer_size=layer_size,
+                dropout=dropout,
+            )
+            for _ in range(num_blocks_trend)
+        ])
+
+    # ============================================================
+    # FORWARD
+    # ============================================================
     def forward(self, x):
         """
         x: (batch, window, features)
         """
-        x = x.reshape(x.size(0), -1)   # flatten
+        batch = x.size(0)
+        x_flat = x.reshape(batch, -1)   # (batch, window*features)
 
-        residual = x
+        residual = x_flat
         forecast_final = 0
 
-        for block in self.blocks:
+        # --- GENERIC STACK ---
+        for block in self.generic_blocks:
             backcast, forecast = block(residual)
+            residual = residual - backcast
+            forecast_final = forecast_final + forecast
 
+        # --- TREND STACK ---
+        for block in self.trend_blocks:
+            backcast, forecast = block(residual)
             residual = residual - backcast
             forecast_final = forecast_final + forecast
 

@@ -1,72 +1,67 @@
 # =====================================================================
-#  Normalizer V3 — Industrial, consistente com toda a pipeline
+#  Normalizer V5 — Coerente, funcional e 100% estável
 # =====================================================================
 
 import pandas as pd
 import numpy as np
 import joblib
 from pathlib import Path
-
 from config.paths import get_paths
 
 
 # =====================================================================
-# Custom Scalers — matematicamente rigorosos
+#  SCALERS
 # =====================================================================
-class StandardScalerCustom:
-    """Implementação manual de StandardScaler (mean/std)."""
 
+class StandardScalerCustom:
     def __init__(self):
         self.mean_ = None
         self.std_ = None
 
-    def fit(self, data: np.ndarray):
+    def fit(self, data):
         self.mean_ = np.mean(data, axis=0)
         self.std_ = np.std(data, axis=0)
-        # evitar divisões por zero
         self.std_[self.std_ == 0] = 1e-8
         return self
 
-    def transform(self, data: np.ndarray):
+    def transform(self, data):
         return (data - self.mean_) / self.std_
 
-    def inverse_transform(self, data: np.ndarray):
+    def inverse_transform(self, data):
         return data * self.std_ + self.mean_
 
 
 class RobustScalerCustom:
-    """Implementação manual de RobustScaler (median / IQR)."""
-
     def __init__(self):
         self.median_ = None
         self.iqr_ = None
 
-    def fit(self, data: np.ndarray):
+    def fit(self, data):
         self.median_ = np.median(data, axis=0)
         q1 = np.percentile(data, 25, axis=0)
         q3 = np.percentile(data, 75, axis=0)
-        self.iqr_ = q3 - q1
-        self.iqr_[self.iqr_ == 0] = 1e-8
+        iqr = q3 - q1
+        iqr[iqr == 0] = 1e-8
+        self.iqr_ = iqr
         return self
 
-    def transform(self, data: np.ndarray):
+    def transform(self, data):
         return (data - self.median_) / self.iqr_
 
-    def inverse_transform(self, data: np.ndarray):
+    def inverse_transform(self, data):
         return data * self.iqr_ + self.median_
 
 
 # =====================================================================
-# Normalizer V3 — integradíssimo com a estrutura ML_Trade
+#  NORMALIZER
 # =====================================================================
+
 class Normalizer:
     """
-    Normalizer Industrial:
-    - remove velas sintéticas
-    - adiciona logreturn (opcional)
-    - aplica scaler robusto ou standard a OHLCV
-    - salva scaler por ticker em storage/scalers/<TICKER>_scaler.pkl
-    - garante dataset limpo, finito e estável
+    Corrigido:
+    - Usa SEMPRE object save/load (nunca dict)
+    - Nunca mistura formatos
+    - Evita erro 'object not subscriptable'
     """
 
     def __init__(self, scaler_type="standard", use_logreturn=True, ticker="GENERIC"):
@@ -74,92 +69,89 @@ class Normalizer:
         self.use_logreturn = use_logreturn
         self.ticker = ticker.upper()
 
-        # escolher scaler
         if scaler_type == "standard":
             self.scaler = StandardScalerCustom()
-        elif scaler_type == "robust":
-            self.scaler = RobustScalerCustom()
         else:
-            raise ValueError("scaler_type deve ser 'standard' ou 'robust'.")
+            self.scaler = RobustScalerCustom()
 
-        # caminhos industriais
         paths = get_paths(self.ticker)
         self.scaler_path = Path(paths["scalers"]) / f"{self.ticker}_scaler.pkl"
 
-    # -----------------------------------------------------------------
-    # LOGRETURN seguro (sem warnings)
-    # -----------------------------------------------------------------
-    @staticmethod
-    def compute_logreturn(series: pd.Series) -> pd.Series:
-        s = series.replace(0, np.nan)
-        lr = np.log(s / s.shift(1))
-        lr = lr.replace([np.inf, -np.inf], np.nan).fillna(0)
-        return lr
+    # ---------------------------
+    # INTERNAL: save / load
+    # ---------------------------
 
-    # -----------------------------------------------------------------
-    # extrair OHLCV para matriz
-    # -----------------------------------------------------------------
-    @staticmethod
-    def _extract_matrix(df: pd.DataFrame) -> np.ndarray:
-        return df[["open", "high", "low", "close", "volume"]].values
-
-    @staticmethod
-    def _apply_scaled(df: pd.DataFrame, scaled: np.ndarray) -> pd.DataFrame:
-        df = df.copy()
-        df["open"], df["high"], df["low"], df["close"], df["volume"] = scaled.T
-        return df
-
-    # -----------------------------------------------------------------
-    # salvar / carregar scaler
-    # -----------------------------------------------------------------
-    def save(self):
+    def save_scaler(self):
         joblib.dump(self.scaler, self.scaler_path)
 
-    def load(self):
+    def load_scaler(self) -> bool:
         if self.scaler_path.exists():
             self.scaler = joblib.load(self.scaler_path)
             return True
         return False
 
-    # -----------------------------------------------------------------
-    # NORMALIZAÇÃO PRINCIPAL
-    # -----------------------------------------------------------------
+    # ---------------------------
+
+    @staticmethod
+    def compute_logreturn(series):
+        s = series.replace(0, np.nan)
+        lr = np.log(s / s.shift(1))
+        return lr.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    @staticmethod
+    def _extract_matrix(df):
+        return df[["open", "high", "low", "close", "volume"]].values
+
+    @staticmethod
+    def _apply_scaled(df, scaled):
+        df2 = df.copy()
+        df2["open"], df2["high"], df2["low"], df2["close"], df2["volume"] = scaled.T
+        return df2
+
+    # =================================================================
+    # MAIN NORMALIZATION
+    # =================================================================
+
     def normalize(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
 
-        # 1) remover velas sintéticas
+        # Remove velas sintéticas
         if "synthetic" in df.columns:
-            synth = int(df["synthetic"].sum())
-            if synth > 0:
-                print(f"[Normalizer] Removidas {synth} velas sintéticas.")
-                df = df[df["synthetic"] == 0].reset_index(drop=True)
+            df = df[df["synthetic"] == 0].reset_index(drop=True)
 
-        # 2) calcular logreturn
-        if self.use_logreturn:
-            df["logreturn"] = self.compute_logreturn(df["close"])
-        else:
-            df["logreturn"] = 0.0
+        if len(df) == 0:
+            raise ValueError("Normalizer: dataset vazio após remover sintéticas.")
 
-        # 3) extrair OHLCV
+        # logreturn
+        df["logreturn"] = (
+            self.compute_logreturn(df["close"])
+            if self.use_logreturn else 0.0
+        )
+
         matrix = self._extract_matrix(df)
 
-        # 4) fit + transform
+        # Fit sempre em preprocess — nunca tenta load aqui
         self.scaler.fit(matrix)
-        scaled_matrix = self.scaler.transform(matrix)
+        scaled = self.scaler.transform(matrix)
 
-        df = self._apply_scaled(df, scaled_matrix)
+        df_out = self._apply_scaled(df, scaled)
 
-        # 5) limpeza final
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df = df.dropna().reset_index(drop=True)
+        df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df_out.dropna(inplace=True)
+        df_out.reset_index(drop=True, inplace=True)
 
-        # 6) guardar scaler industrial
-        self.save()
+        self.save_scaler()
 
-        return df
+        return df_out
 
-    # -----------------------------------------------------------------
-    # reverter normalização
-    # -----------------------------------------------------------------
-    def inverse(self, normalized: np.ndarray) -> np.ndarray:
-        return self.scaler.inverse_transform(normalized)
+    # =================================================================
+    # INVERSE
+    # =================================================================
+
+    def inverse_close(self, norm_value):
+        """
+        Inversão só da coluna close.
+        Usada pela PriceDenormalizer.
+        """
+        idx = 3  # posição da coluna close
+        return float(norm_value * self.scaler.std_[idx] + self.scaler.mean_[idx])

@@ -1,1 +1,6 @@
-{"ticker":"GALP.LS","window_size":60,"horizon":3,"frequency":"1h","rows_final":5684,"n_features":37}
+{
+    "ticker": "GALP.LS",
+    "window_size": 64,
+    "horizon": 1,
+    "n_features": 37
+}

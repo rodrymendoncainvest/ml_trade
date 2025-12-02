@@ -4,21 +4,25 @@ import pandas as pd
 
 class FeatureGenerator:
     """
-    Feature Generator V3 Industrial.
-    - Indicadores robustos, matematicamente seguros.
-    - Proteções anti-NaN em todas as operações.
-    - Price Action avançado.
-    - Momentum, tendência, volume.
-    - Volatilidade moderna (GK, Parkinson, RS).
-    - Bollinger, Keltner, Squeeze (Robusto).
-    - Patterns de velas (binários).
-    - VWAP + VWAP bands.
-    - Regime técnico (trend/vol/mom).
+    Feature Generator V4 Industrial.
+    Robusto, seguro, sem warnings, sem NaNs, sem infinities.
     """
 
     # ============================================================
     # AUXILIARES SEGUROS
     # ============================================================
+
+    @staticmethod
+    def _safe_div(a, b):
+        b_safe = b.replace(0, 1e-9)
+        out = a / b_safe
+        return out.replace([np.inf, -np.inf], 0).fillna(0)
+
+    @staticmethod
+    def _safe_log(a):
+        a_safe = a.replace(0, np.nan)
+        out = np.log(a_safe)
+        return out.replace([np.inf, -np.inf], 0).fillna(0)
 
     @staticmethod
     def _ema(series, period):
@@ -39,55 +43,88 @@ class FeatureGenerator:
         return ranges.max(axis=1)
 
     # ============================================================
-    # PRICE ACTION (SEGURO)
+    # PRICE ACTION SEGURO
     # ============================================================
 
     def _price_action(self, df):
-        open_ = df["open"]
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
+        o = df["open"]
+        h = df["high"]
+        l = df["low"]
+        c = df["close"]
 
-        body = (close - open_).abs()
-        direction = np.sign(close - open_).fillna(0)
+        body = (c - o).abs()
+        direction = np.sign(c - o).fillna(0)
 
-        total_range = (high - low).replace(0, 1e-9)
+        total_range = (h - l).replace(0, 1e-9)
 
-        upper_wick = (high - np.maximum(open_, close))
-        lower_wick = (np.minimum(open_, close) - low)
+        upper = h - np.maximum(o, c)
+        lower = np.minimum(o, c) - l
 
-        body_ratio = (body / total_range).fillna(0)
-        range_rel = total_range / total_range.rolling(20).mean()
-        range_rel = range_rel.replace([np.inf, -np.inf], 0)
+        body_ratio = self._safe_div(body, total_range)
 
-        return body, upper_wick, lower_wick, body_ratio, direction, range_rel
+        mean_range = total_range.rolling(20).mean().replace(0, 1e-9)
+        range_rel = self._safe_div(total_range, mean_range)
+
+        return body, upper, lower, body_ratio, direction, range_rel
 
     # ============================================================
-    # VELAS / PATTERNS (BINÁRIOS, PARCIAIS)
+    # CANDLE PATTERNS (SEGUROS)
     # ============================================================
 
     def _patterns(self, df):
         body = (df["close"] - df["open"]).abs()
         total = (df["high"] - df["low"]).replace(0, 1e-9)
 
-        small_body = (body / total) < 0.2
-        long_body = (body / total) > 0.7
+        ratio = self._safe_div(body, total)
 
-        bullish = df["close"] > df["open"]
-        bearish = df["close"] < df["open"]
+        small_body = (ratio < 0.2).astype(int)
+        long_body = (ratio > 0.7).astype(int)
 
-        hammer = (small_body & (df["low"] < df["open"]) &
-                  ((df["open"] - df["low"]) > 2 * body)).astype(int)
+        bullish = (df["close"] > df["open"]).astype(int)
+        bearish = (df["close"] < df["open"]).astype(int)
 
-        engulfing = (
-            (bullish & (df["close"] > df["open"].shift(1))) &
-            (df["open"] < df["close"].shift(1))
+        # Hammer robusto
+        hammer = (
+            (ratio < 0.2) &
+            ((df["open"] - df["low"]) > 2 * body)
         ).astype(int)
 
-        return small_body.astype(int), long_body.astype(int), hammer, engulfing
+        # Engulfing robusto
+        engulf = (
+            (df["close"] > df["open"]) &
+            (df["open"] < df["close"].shift(1)) &
+            (df["close"] > df["open"].shift(1))
+        ).astype(int)
+
+        return small_body, long_body, hammer, engulf
 
     # ============================================================
-    # MOMENTUM / TREND
+    # OSCILADORES
+    # ============================================================
+
+    def _rsi(self, close, period=14):
+        delta = close.diff()
+        up = delta.clip(lower=0)
+        down = (-delta).clip(lower=0)
+
+        ma_up = up.rolling(period).mean()
+        ma_down = down.rolling(period).mean().replace(0, 1e-9)
+
+        rs = self._safe_div(ma_up, ma_down)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.fillna(50)
+
+    def _stochastic(self, df, period=14, smooth=3):
+        low_min = df["low"].rolling(period).min()
+        high_max = df["high"].rolling(period).max().replace(0, 1e-9)
+
+        k = 100 * self._safe_div(df["close"] - low_min, high_max - low_min)
+        d = k.rolling(smooth).mean()
+
+        return k.fillna(50), d.fillna(50)
+
+    # ============================================================
+    # TREND & MOMENTUM
     # ============================================================
 
     def _momentum(self, close, period=10):
@@ -101,76 +138,63 @@ class FeatureGenerator:
         return ema20 - ema50, macd_line
 
     # ============================================================
-    # OSCILADORES
-    # ============================================================
-
-    def _rsi(self, close, period=14):
-        delta = close.diff()
-        up = delta.clip(lower=0)
-        down = (-delta).clip(lower=0)
-        ma_up = up.rolling(period).mean()
-        ma_down = down.rolling(period).mean()
-        rs = ma_up / ma_down.replace(0, 1e-9)
-        return (100 - (100 / (1 + rs))).fillna(50)
-
-    def _stochastic(self, df, period=14, smooth=3):
-        low_min = df["low"].rolling(period).min()
-        high_max = df["high"].rolling(period).max()
-        k = 100 * (df["close"] - low_min) / (high_max - low_min).replace(0, 1e-9)
-        d = k.rolling(smooth).mean()
-        return k.fillna(50), d.fillna(50)
-
-    # ============================================================
-    # VOLATILIDADE MODERNA
+    # VOLATILIDADES (Blindadas)
     # ============================================================
 
     def _parkinson(self, df):
-        v = (np.log(df["high"] / df["low"]) ** 2).replace([np.inf, -np.inf], 0)
-        return v.rolling(20).mean()
+        out = (self._safe_log(df["high"] / df["low"]) ** 2).rolling(20).mean()
+        return out.fillna(0)
 
     def _garman_klass(self, df):
-        hl = np.log(df["high"] / df["low"]) ** 2
-        oc = 0.5 * (np.log(df["close"] / df["open"]) ** 2)
+        hl = (self._safe_log(df["high"] / df["low"]) ** 2)
+        oc = 0.5 * (self._safe_log(df["close"] / df["open"]) ** 2)
         vol = (hl - oc).rolling(20).mean()
-        return vol.replace([np.inf, -np.inf], 0)
+        return vol.fillna(0)
 
     def _rogers_satchell(self, df):
-        term1 = np.log(df["high"] / df["close"]) * np.log(df["high"] / df["open"])
-        term2 = np.log(df["low"] / df["close"]) * np.log(df["low"] / df["open"])
+        term1 = self._safe_log(df["high"] / df["close"]) * self._safe_log(df["high"] / df["open"])
+        term2 = self._safe_log(df["low"] / df["close"]) * self._safe_log(df["low"] / df["open"])
         vol = (term1 + term2).rolling(20).mean()
-        return vol.replace([np.inf, -np.inf], 0)
+        return vol.replace([np.inf, -np.inf], 0).fillna(0)
 
     # ============================================================
-    # BOLLINGER, KELTNER, SQUEEZE
+    # BOLLINGER / KELTNER / SQUEEZE
     # ============================================================
 
     def _bollinger(self, close, period=20, std_mult=2):
         mid = self._sma(close, period)
-        std = close.rolling(period).std()
-        upper = mid + std * std_mult
-        lower = mid - std * std_mult
+        std = close.rolling(period).std().fillna(0)
+        upper = mid + std_mult * std
+        lower = mid - std_mult * std
         return mid, upper, lower
 
     def _keltner(self, df, period=20):
         tr = self._true_range(df)
         mid = self._ema(df["close"], period)
-        return mid, mid + 1.5 * tr.rolling(period).mean(), mid - 1.5 * tr.rolling(period).mean()
+        atr = tr.rolling(period).mean().replace(0, 1e-9)
+        upper = mid + 1.5 * atr
+        lower = mid - 1.5 * atr
+        return mid, upper, lower
 
-    def _squeeze(self, close, bb_upper, bb_lower, kc_upper, kc_lower):
-        return ((bb_lower > kc_lower) & (bb_upper < kc_upper)).astype(int)
+    def _squeeze(self, bb_u, bb_l, kc_u, kc_l):
+        return ((bb_l > kc_l) & (bb_u < kc_u)).astype(int)
 
     # ============================================================
-    # VOLUME
+    # VOLUME & VWAP (blindados)
     # ============================================================
 
     def _obv(self, df):
-        return (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
+        sign = np.sign(df["close"].diff()).fillna(0)
+        return (sign * df["volume"]).cumsum().fillna(0)
 
     def _vwap(self, df):
         typical = (df["high"] + df["low"] + df["close"]) / 3
-        cum_vol = df["volume"].cumsum().replace(0, 1e-9)
-        cum_pv = (typical * df["volume"]).cumsum()
-        return (cum_pv / cum_vol).fillna(method="bfill").fillna(method="ffill")
+        vol = df["volume"].replace(0, 1e-9)
+
+        cum_vol = vol.cumsum().replace(0, 1e-9)
+        cum_pv = (typical * vol).cumsum()
+
+        return self._safe_div(cum_pv, cum_vol)
 
     # ============================================================
     # REGIME
@@ -191,18 +215,18 @@ class FeatureGenerator:
         df = df.copy()
 
         # PRICE ACTION
-        body, uw, lw, br, direction, rrel = self._price_action(df)
+        body, uw, lw, br, direction, range_rel = self._price_action(df)
         df["body"] = body
         df["upper_wick"] = uw
         df["lower_wick"] = lw
         df["body_ratio"] = br
         df["direction"] = direction
-        df["range_rel"] = rrel
+        df["range_rel"] = range_rel
 
         # PATTERNS
-        small, longb, hammer, engulf = self._patterns(df)
-        df["pattern_small"] = small
-        df["pattern_long"] = longb
+        p_small, p_long, hammer, engulf = self._patterns(df)
+        df["pattern_small"] = p_small
+        df["pattern_long"] = p_long
         df["pattern_hammer"] = hammer
         df["pattern_engulf"] = engulf
 
@@ -212,18 +236,18 @@ class FeatureGenerator:
         df["stoch_k"] = k
         df["stoch_d"] = d
 
-        # TREND / MOMENTUM
+        # TREND & MOMENTUM
         trend, macd_line = self._trend(df)
         df["trend"] = trend
         df["macd_line"] = macd_line
         df["mom_10"] = self._momentum(df["close"], 10)
 
-        # VOLATILIDADE MODERNA
+        # VOLATILIDADE
         df["park_vol"] = self._parkinson(df)
         df["gk_vol"] = self._garman_klass(df)
         df["rs_vol"] = self._rogers_satchell(df)
 
-        # BOLLINGER / KELTNER / SQUEEZE
+        # BOLLINGER + KELTNER + SQUEEZE
         mid, bb_u, bb_l = self._bollinger(df["close"])
         kmid, ku, kl = self._keltner(df)
         df["bb_mid"] = mid
@@ -231,9 +255,9 @@ class FeatureGenerator:
         df["bb_lower"] = bb_l
         df["kc_upper"] = ku
         df["kc_lower"] = kl
-        df["squeeze_on"] = self._squeeze(df["close"], bb_u, bb_l, ku, kl)
+        df["squeeze_on"] = self._squeeze(bb_u, bb_l, ku, kl)
 
-        # VOLUME
+        # VOLUME + VWAP
         df["obv"] = self._obv(df)
         df["vwap"] = self._vwap(df)
 
@@ -243,8 +267,8 @@ class FeatureGenerator:
         df["regime_vol"] = vol
         df["regime_mom"] = mom
 
-        # CLEANUP
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.dropna().reset_index(drop=True)
+        # FINAL CLEANUP (sem drop maciço)
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df = df.fillna(0)
 
         return df

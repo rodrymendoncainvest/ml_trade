@@ -4,57 +4,29 @@ import pandas as pd
 
 class WindowBuilder:
     """
-    WindowBuilder V3 Industrial
-    - Constrói tensores temporais para modelos sequenciais.
-    - Compatível com TCN / LSTM / GRU / Transformer / N-BEATS.
-    - Robusto contra NaNs, shapes inconsistentes e features faltantes.
+    WindowBuilder industrial para modelos sequenciais (TCN, LSTM,
+    GRU, Transformer, N-BEATS).
 
-    Output:
-        X → shape (N, window_size, n_features)
-        y → shape (N,) ou (N, horizon)
+    - Cria janelas deslizantes X com shape (N, window, features)
+    - Cria targets y com multi-step (horizon)
+    - Compatível com build_single para inferência
     """
 
-    def __init__(
-        self,
-        window_size: int = 64,
-        horizon: int = 1,
-        feature_cols: list | None = None,
-        target_col: str = "close",
-        enforce_strict=True
-    ):
-        """
-        window_size: nº de velas usadas como input.
-        horizon: nº de velas previstas (1 = previsão pontual).
-        feature_cols: lista de features a usar.
-        target_col: coluna alvo (tipicamente close ou logreturn).
-        enforce_strict: força validação rigorosa do dataset.
-        """
-        self.window_size = window_size
-        self.horizon = horizon
+    def __init__(self, window_size, horizon, feature_cols, target_col="close"):
+        self.window_size = int(window_size)
+        self.horizon = int(horizon)
         self.feature_cols = feature_cols
         self.target_col = target_col
-        self.enforce_strict = enforce_strict
 
-    # ============================================================
-    # VALIDAÇÕES
-    # ============================================================
+        if not isinstance(self.feature_cols, list):
+            raise ValueError("WindowBuilder: feature_cols deve ser lista de strings.")
 
-    def _validate_columns(self, df: pd.DataFrame):
-        if self.feature_cols is None:
-            raise ValueError("WindowBuilder: feature_cols não especificado.")
+        if len(self.feature_cols) == 0:
+            raise ValueError("WindowBuilder: feature_cols vazio.")
 
-        missing = [c for c in self.feature_cols if c not in df.columns]
-        if missing:
-            raise ValueError(f"WindowBuilder: faltam features: {missing}")
-
-        if self.target_col not in df.columns:
-            raise ValueError(f"WindowBuilder: target '{self.target_col}' não existe no DataFrame.")
-
-    def _validate_no_nan(self, df: pd.DataFrame):
-        subset = self.feature_cols + [self.target_col]
-        if df[subset].isna().any().any():
-            raise ValueError("WindowBuilder: NaNs encontrados nas features ou target.")
-
+    # -----------------------------------------------------------
+    #  VALIDATE DATAFRAME LENGTH
+    # -----------------------------------------------------------
     def _validate_length(self, df: pd.DataFrame):
         required = self.window_size + self.horizon
         if len(df) < required:
@@ -63,56 +35,43 @@ class WindowBuilder:
                 f"Existem {len(df)} linhas, mínimo necessário: {required}."
             )
 
-    # ============================================================
-    # BUILD COMPLETO
-    # ============================================================
-
+    # -----------------------------------------------------------
+    #  BUILD FULL DATASET (TRAINING)
+    # -----------------------------------------------------------
     def build(self, df: pd.DataFrame):
-        df = df.reset_index(drop=True).copy()
+        df = df.reset_index(drop=True)
 
-        if self.enforce_strict:
-            self._validate_columns(df)
-            self._validate_no_nan(df)
-            self._validate_length(df)
+        self._validate_length(df)
 
-        features = df[self.feature_cols].values.astype(np.float32)
+        data = df[self.feature_cols].values.astype(np.float32)
         target = df[self.target_col].values.astype(np.float32)
 
-        X = []
-        y = []
+        X_list = []
+        y_list = []
 
-        max_start = len(df) - (self.window_size + self.horizon)
+        limit = len(df) - self.window_size - self.horizon + 1
 
-        for start in range(max_start):
-            end = start + self.window_size
-            horizon_end = end + self.horizon
+        for i in range(limit):
+            window = data[i : i + self.window_size]
+            future = target[i + self.window_size : i + self.window_size + self.horizon]
 
-            window = features[start:end]
+            X_list.append(window)
+            y_list.append(future)
 
-            if self.horizon == 1:
-                target_seq = target[end]
-            else:
-                target_seq = target[end:horizon_end]
-
-            X.append(window)
-            y.append(target_seq)
-
-        X = np.array(X, dtype=np.float32)
-
-        if self.horizon == 1:
-            y = np.array(y, dtype=np.float32).reshape(-1)
-        else:
-            y = np.array(y, dtype=np.float32)
+        X = np.array(X_list, dtype=np.float32)
+        y = np.array(y_list, dtype=np.float32)
 
         return X, y
 
-    # ============================================================
-    # SINGLE WINDOW (real-time)
-    # ============================================================
+    # -----------------------------------------------------------
+    #  BUILD SINGLE WINDOW (INFERENCE)
+    # -----------------------------------------------------------
+    def build_single(self, df: pd.DataFrame) -> np.ndarray:
+        """
+        Usado apenas na inferência.
 
-    def build_single(self, df: pd.DataFrame):
-        if self.feature_cols is None:
-            raise ValueError("WindowBuilder: feature_cols não definido.")
+        Retorna última janela com shape (window_size, features)
+        """
 
         df = df.reset_index(drop=True)
 
@@ -123,6 +82,7 @@ class WindowBuilder:
             )
 
         data = df[self.feature_cols].values.astype(np.float32)
-        window = data[-self.window_size:]
+
+        window = data[-self.window_size :]
 
         return np.array(window, dtype=np.float32)
